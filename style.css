@@ -1,0 +1,74 @@
+/* --- BASE STYLES (from Original Body Tag) --- */
+body { 
+  background: #0f172a; 
+  color: #f1f5f9; 
+  font-family: system-ui, -apple-system, sans-serif; 
+  margin: 0;
+  padding: 0;
+}
+
+/* --- LANGUAGE DIRECTION SUPPORT --- */
+:root[dir="rtl"] { 
+  direction: rtl; 
+}
+
+/* --- PRINT SETTINGS (Used for Partner Settle-up Reports) --- */
+@media print {
+  .no-print { 
+    display: none !important; 
+  }
+  body { 
+    background: white !important; 
+    color: black !important; 
+  }
+}
+
+/* --- DATE PICKER UI TWEAK --- */
+/* This makes the calendar icon visible on the dark background */
+input[type="date"]::-webkit-calendar-picker-indicator { 
+  filter: invert(0.8); 
+}
+
+/* --- LOADING SPINNER ANIMATION --- */
+.spinner { 
+  width: 40px; 
+  height: 40px; 
+  border: 4px solid #334155; 
+  border-top-color: #f97316; 
+  border-radius: 50%; 
+  animation: spin 0.8s linear infinite; 
+}
+
+@keyframes spin { 
+  to { transform: rotate(360deg); } 
+}
+
+/* --- CUSTOM LAYOUT SCROLLBARS --- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #f97316;
+}
+
+/* --- UTILITIES --- */
+/* Ensuring buttons don't have that blue highlight on tap in Android */
+button, select, input {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Responsive container fixes for small phone screens */
+.max-w-5xl {
+  width: 100%;
+}
