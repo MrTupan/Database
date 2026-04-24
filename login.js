@@ -49,11 +49,11 @@ window.Login = function({ onLogin }) {
     e.preventDefault();
     
     // Exact logic from your original index.html
-    if (pw === "admin123") { 
+    if (pw === "wali@lemar") { 
       onLogin("monitor"); 
       return; 
     }
-    if (pw === "modifier321") { 
+    if (pw === "nabizada@lemar") { 
       onLogin("editor");  
       return; 
     }
