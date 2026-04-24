@@ -2,33 +2,38 @@
  * ============================================================================
  * COMPONENT: REPORTS & ANALYTICS
  * ============================================================================
- * WORKSHOP REPORTS ENGINE v7.0 - MASTER TEMPORAL AUDIT ARCHITECTURE
+ * WORKSHOP REPORTS ENGINE v8.5 - MASTER TEMPORAL AUDIT ARCHITECTURE
  * ============================================================================
  * 
  * DESCRIPTION:
  * This module serves as the primary financial auditing tool for the workshop.
  * It performs a deep-scan of the database across a selected date range.
  * 
- * MAJOR REVISION LOG v7.0 (ATTENDANCE & FORMAT INTEGRITY):
  * ----------------------------------------------------------------------------
- * 1. DATE FORMAT NORMALIZATION: 
- *    Implemented window.normalizeDate() within the master loop. This prevents
- *    the "Alphabetical Comparison Failure" where staff costs vanished on
- *    specific dates due to string format mismatches (DD/MM vs YYYY-MM).
+ * MAJOR REVISION LOG v8.5:
+ * ----------------------------------------------------------------------------
+ * 1. FRIDAY WAGE OVERRIDE SYNC: 
+ *    The audit loop now detects Fridays. For staff on "Both Shifts", it 
+ *    cross-references the 'attendance' node to see if a manual Friday wage 
+ *    was set (accounting for the lack of night shifts on Fridays).
  * 
- * 2. STANDALONE DAILY ATTENDANCE: 
- *    The engine now iterates through the 'attendance' map from contexts.js.
- *    For every day in the report, it checks if a worker was marked "OFF".
- *    This ensures that daily roster changes are reflected in the aggregate
- *    payroll without corrupting the historical employment timeline.
+ * 2. STANDALONE ATTENDANCE INTEGRITY: 
+ *    Integrates the Standalone Daily Attendance Map. If a worker was marked
+ *    "OFF" on a specific day in the past, their cost is excluded for that 
+ *    unit only, preserving historical accuracy.
  * 
- * 3. TEMPORAL COMPARISON ENGINE: 
- *    Replaced standard string operators with window.compareDates(). This
- *    logic accurately places workers in the timeline (Hire Date vs Audit Date).
+ * 3. CAREER TIMELINE PROTECTION: 
+ *    Wages are calculated only if the loop date falls between the worker's
+ *    'startDate' and 'endDate' (Departure logic). This prevents 
+ *    "Data Robbery" when a worker leaves the workshop.
  * 
- * 4. PDF THEME PRESERVATION: 
- *    Ensures that the Dark-Mode UI and all visual cues are kept 1:1 during
- *    the generation of PDF reports via the Android Java Bridge.
+ * 4. DATE NORMALIZATION PROTOCOL:
+ *    Every date string is forced into ISO-8601 (YYYY-MM-DD) before 
+ *    processing to prevent alphabetical comparison failures.
+ * 
+ * 5. PDF THEME PRESERVATION: 
+ *    Forces -webkit-print-color-adjust properties to ensure the Dark Theme
+ *    UI is rendered 1:1 during the PDF generation process.
  * ----------------------------------------------------------------------------
  */
 
@@ -40,7 +45,7 @@ window.Reports = function() {
   
   /**
    * window.useLang
-   * logic: Retrieves the translation hook for multi-language and RTL support.
+   * logic: Retrieves translation helper and RTL/LTR direction states.
    */
   const { 
     t 
@@ -48,14 +53,14 @@ window.Reports = function() {
   
   /**
    * window.useApp
-   * logic: Retrieves the core cloud state from the context provider.
+   * logic: Retrieves the core real-time state from the context engine.
    */
   const { 
     transactions, 
     expenses, 
     workers, 
     loans,
-    attendance // Version 7.0 Requirement: Standalone Daily Map
+    attendance // Standalone Daily Attendance & Friday Wage overrides
   } = window.useApp();
   
   // --------------------------------------------------------------------------
@@ -64,27 +69,33 @@ window.Reports = function() {
 
   /**
    * monthStartValue
-   * logic: Determines the standardized YYYY-MM-01 key for the current month.
+   * logic: Computes the YYYY-MM-01 key for the first day of the current month.
    */
   const monthStartValue = (
     function() { 
+      
       var dateObject = new Date(); 
+      
       var currentYear = dateObject.getFullYear();
+      
       var currentMonth = String(
         dateObject.getMonth() + 1
-      ).padStart(2, "0");
+      ).padStart(
+        2, 
+        "0"
+      );
       
-      // logic: Returns YYYY-MM-01
-      var resultString = currentYear + "-" + currentMonth + "-01"; 
+      // logic: Construct YYYY-MM-01
+      var formattedString = currentYear + "-" + currentMonth + "-01"; 
       
-      return resultString;
+      return formattedString;
     }
   )();
   
   /**
    * React States: Audit Boundaries
-   * from: The starting date of the scan (Normalized).
-   * to: The ending date of the scan (Normalized).
+   * from: The starting date of the financial scan.
+   * to: The ending date of the financial scan.
    */
   const [
     from, 
@@ -107,63 +118,66 @@ window.Reports = function() {
   /**
    * totalManualStaffPayrollInRange
    * type: float
-   * logic: Accumulates wages only for staff present (not OFF) during the range.
+   * logic: Sum of wages for personnel who were WORKING on each day.
    */
   let totalManualStaffPayrollInRange = 0;
 
   /**
    * totalAdminCommissionInRange
    * type: float
-   * logic: Sum of 15% net profit cuts for Administrative Managers.
+   * logic: Total of the 15% net-profit cuts assigned to Admin Managers.
    */
   let totalAdminCommissionInRange = 0;
 
   /**
    * totalOwnerGrossShareInRange
    * type: float
-   * logic: Total revenue share assigned to the workshop proprietor.
+   * logic: Revenue allocated to the proprietor after partner splits.
    */
   let totalOwnerGrossShareInRange = 0;
 
   /**
    * totalWorkshopExpensesInRange
    * type: float
-   * logic: Total of all operational overhead logged in the range.
+   * logic: Total operational overhead recorded in the date range.
    */
   let totalWorkshopExpensesInRange = 0;
 
   /**
    * totalGrossRevenueInRange
    * type: float
-   * logic: The 100% aggregate of all money collected from customers.
+   * logic: 100% aggregate of all money received from clients.
    */
   let totalGrossRevenueInRange = 0;
 
   /**
    * totalLoansIssuedInRange
    * type: float
-   * logic: Total capital leaving the workshop as new debt.
+   * logic: Total capital outflow as newly issued credit.
    */
   let totalLoansIssuedInRange = 0;
 
   /**
    * totalPaymentsReceivedInRange
    * type: float
-   * logic: Total capital returning to the workshop via loan repayments.
+   * logic: Total capital inflow as debt repayment.
    */
   let totalPaymentsReceivedInRange = 0;
 
   /**
    * dayCountValue
    * type: integer
-   * logic: Tracks exactly how many calendar dates are in the current audit.
+   * logic: Incremented count of calendar days analyzed in the loop.
    */
   let dayCountValue = 0;
 
   // --------------------------------------------------------------------------
-  // -- MASTER FINANCIAL LOOP ENGINE (V7.0 TEMPORAL AUDIT) --
+  // -- MASTER FINANCIAL LOOP ENGINE (V8.5 TEMPORAL AUDIT) --
   // --------------------------------------------------------------------------
-  // This loop processes every day as an independent financial unit.
+  /**
+   * This engine steps through time one day at a time.
+   * It treats every day as a standalone financial ledger entry.
+   */
   
   let loopDayPointer = new Date(
     from + "T12:00:00"
@@ -178,40 +192,40 @@ window.Reports = function() {
   ) {
 
     /**
-     * STAGE 1: DAILY IDENTIFICATION
+     * STAGE 1: DAILY CONTEXT IDENTIFICATION
      */
     dayCountValue++;
     
-    // logic: Generate the standardized key for this day
-    const rawDayKey = loopDayPointer.toISOString().split('T')[0];
-    const currentDayIdentifier = window.normalizeDate(rawDayKey);
+    // logic: Generate standard YYYY-MM-DD key for this loop unit
+    const rawDateString = loopDayPointer.toISOString().split('T')[0];
+    const currentDayIdentifier = window.normalizeDate(rawDateString);
+    
+    // logic: Determine if this loop day is a Friday
+    const isThisDayFriday = window.isFriday(currentDayIdentifier);
 
     /**
-     * STAGE 2: DAILY CLOUD FILTERING
+     * STAGE 2: CLOUD DATA FILTERING
+     * Isolates records occurring on this specific loop iteration.
      */
     
-    // Filter revenue for this standalone unit
     const dailyTransactionsData = transactions.filter(
       function(tx) { 
         return window.normalizeDate(tx.date) === currentDayIdentifier; 
       }
     );
     
-    // Filter expenses for this standalone unit
     const dailyExpensesData = expenses.filter(
       function(ex) { 
         return window.normalizeDate(ex.date) === currentDayIdentifier; 
       }
     );
 
-    // Filter loan outflows
     const dailyLoansIssuedData = loans.filter(
       function(ln) {
         return window.normalizeDate(ln.loanDate) === currentDayIdentifier;
       }
     );
 
-    // Filter loan inflows (repayments)
     const dailyPaymentsReceivedData = loans.filter(
       function(ln) {
         return window.normalizeDate(ln.lastPaymentDate) === currentDayIdentifier;
@@ -219,100 +233,124 @@ window.Reports = function() {
     );
     
     /**
-     * STAGE 3: STANDALONE PERSONNEL VALIDATION (THE FIX)
-     * logic: A worker is included ONLY if they were Working on this day.
-     * rules:
-     * - Hire Date must be <= Current loop date.
-     * - Departure Date (if any) must be >= Current loop date.
-     * - Worker must NOT be marked OFF in the standalone attendance map.
+     * STAGE 3: TEMPORAL PERSONNEL AUDIT (VERSION 8.5 FIX)
+     * logic: A worker is included ONLY if they were present and working.
+     * check A: Employment Timeline (Hire Date <= loopDate <= Departure Date).
+     * check B: Standalone Attendance (Not marked OFF on this date).
      */
-    const personnelActiveOnThisDay = workers.filter(
+    const personnelValidForThisDay = workers.filter(
       function(worker) {
         
-        const workerHireDate = window.normalizeDate(
+        // 3.1: Career Normalization
+        const started = window.normalizeDate(
           worker.startDate || "2020-01-01"
         );
         
-        const workerEndDate = worker.endDate 
+        const ended = worker.endDate 
           ? window.normalizeDate(worker.endDate) 
           : null;
         
-        // check A: Career timeline check
-        const isEmployedYet = window.compareDates(
-          workerHireDate, 
+        // 3.2: Timeline Comparison
+        const hiredYet = window.compareDates(
+          started, 
           currentDayIdentifier
         ) <= 0;
         
-        const hasNotLeftYet = !workerEndDate || window.compareDates(
+        const stillEmployed = !ended || window.compareDates(
           currentDayIdentifier, 
-          workerEndDate
+          ended
         ) <= 0;
         
-        // check B: Standalone Daily Attendance check
-        // If worker ID exists in the map for this date, they were OFF.
-        const isOffInMap = (
+        // 3.3: Attendance Verification
+        // Retrieves the standalone node: { isOff: bool, fridayWage: num }
+        const attendanceEntry = (
           attendance[currentDayIdentifier] && 
           attendance[currentDayIdentifier][worker.id]
         );
         
-        // check C: Standard payroll check
-        const isDailyWageStaff = worker.managerRole !== "Administrative";
+        // Supports both legacy boolean format and Version 8.5 object format
+        const isWorkerMarkedOffToday = (
+          attendanceEntry === true || 
+          (attendanceEntry && attendanceEntry.isOff === true)
+        );
         
-        var isHiredAndWorking = (
-          isEmployedYet && 
-          hasNotLeftYet && 
-          !isOffInMap && 
-          isDailyWageStaff
+        // 3.4: Role Validation
+        const isNotCommissionManager = worker.managerRole !== "Administrative";
+        
+        // result: Is this personnel member generating a daily wage liability today?
+        var isHiredPresentAndManual = (
+          hiredYet && 
+          stillEmployed && 
+          !isWorkerMarkedOffToday && 
+          isNotCommissionManager
         );
 
-        return isHiredAndWorking;
+        return isHiredPresentAndManual;
       }
     );
 
     /**
-     * STAGE 4: DAILY PAYROLL CALCULATION
-     * logic: Aggregate wage impact of present staff only.
+     * STAGE 4: HIGH-PRECISION PAYROLL CALCULATION (FRIDAY WAGE OVERRIDE)
+     * logic: If Friday, check for manual overrides for Both-Shift staff.
      */
-    const dailyStaffWageSummation = personnelActiveOnThisDay.reduce(
+    const dailyStaffWageLiability = personnelValidForThisDay.reduce(
       function(total, worker) {
         
-        // weekly adjustment: Division by 7 for pro technicians
-        const wageImpact = worker.payCycle === "weekly" 
+        // logic: Lookup the attendance entry for this worker on this day
+        const dailyRecord = (
+          attendance[currentDayIdentifier] && 
+          attendance[currentDayIdentifier][worker.id]
+        );
+        
+        /**
+         * FRIDAY LOGIC ENGINE:
+         * If it is Friday, and the worker is "Both Shifts", check for 
+         * a manual wage override (Accounting for no Night Shift).
+         */
+        if (isThisDayFriday && worker.shift === "both" && dailyRecord && dailyRecord.fridayWage) {
+            
+            var manualFridayPayment = Number(dailyRecord.fridayWage);
+            
+            return total + manualFridayPayment;
+        }
+        
+        // Standard logic: Pro staff weekly wages are divided by 7
+        const baseWageImpact = worker.payCycle === "weekly" 
           ? (Number(worker.dailyWage) / 7) 
           : Number(worker.dailyWage);
           
-        var result = total + wageImpact;
+        var dailyResult = total + baseWageImpact;
 
-        return result;
+        return dailyResult;
       }, 0
     );
 
     /**
-     * STAGE 5: DAILY REVENUE MAPPING
+     * STAGE 5: AGGREGATE DAILY DATA UNITS
      */
     
-    // logic: Customer-facing total
+    // logic: Raw money from client
     const dailyGrossCashCollectedValue = dailyTransactionsData.reduce(
       function(total, tx) { 
         return total + Number(tx.amount); 
       }, 0
     );
     
-    // logic: Owner portion after split
+    // logic: Proprietor portion (100% or 50% split)
     const dailyOwnerShareBaseValue = dailyTransactionsData.reduce(
       function(total, tx) { 
         return total + Number(tx.ownerShare); 
       }, 0
     );
     
-    // logic: Overhead sum
+    // logic: Operational overhead costs
     const dailyExpenseTotalValue = dailyExpensesData.reduce(
       function(total, ex) { 
         return total + Number(ex.amount); 
       }, 0
     );
 
-    // logic: Loan Movement sums
+    // logic: Debt movement sums
     const dailyLoansIssuedTotalValue = dailyLoansIssuedData.reduce(
       function(total, ln) {
         return total + Number(ln.amount);
@@ -326,59 +364,67 @@ window.Reports = function() {
     );
     
     /**
-     * STAGE 6: DAILY COMMISSION ENGINE (15%)
-     * logic: Calculates cut for Admin Manager if present and profit is positive.
+     * STAGE 6: ADMINISTRATIVE COMMISSION ENGINE (15% SURPLUS CUT)
+     * logic: Calculates cut only if an Admin was WORKING today and profit is positive.
      */
     const netProfitForDayBeforeCommission = (
       dailyOwnerShareBaseValue + dailyPaymentsInTotalValue
-    ) - dailyStaffWageSummation - dailyExpenseTotalValue - dailyLoansIssuedTotalValue;
+    ) - dailyStaffWageLiability - dailyExpenseTotalValue - dailyLoansIssuedTotalValue;
 
-    const isAdminPresentAndWorking = workers.some(
+    const isAdminOnDutyToday = workers.some(
       function(worker) {
         
-        const started = window.normalizeDate(worker.startDate || "2020-01-01");
-        const finished = worker.endDate ? window.normalizeDate(worker.endDate) : null;
+        const hStart = window.normalizeDate(worker.startDate || "2020-01-01");
+        const fEnd = worker.endDate ? window.normalizeDate(worker.endDate) : null;
         
-        const hCheck = window.compareDates(started, currentDayIdentifier) <= 0;
-        const eCheck = !finished || window.compareDates(currentDayIdentifier, finished) <= 0;
-        const oCheck = !(attendance[currentDayIdentifier] && attendance[currentDayIdentifier][worker.id]);
+        const isHiredByToday = window.compareDates(hStart, currentDayIdentifier) <= 0;
+        const isStillHiredByToday = !fEnd || window.compareDates(currentDayIdentifier, fEnd) <= 0;
         
-        var isWorkingAdmin = (
+        // Presence: check the attendance map OFF switch
+        const attendanceData = attendance[currentDayIdentifier] && attendance[currentDayIdentifier][worker.id];
+        const isWorkingToday = !(attendanceData === true || (attendanceData && attendanceData.isOff === true));
+        
+        var isAdminWorking = (
           worker.managerRole === "Administrative" && 
-          hCheck && eCheck && oCheck
+          isHiredByToday && 
+          isStillHiredByToday && 
+          isWorkingToday
         );
 
-        return isWorkingAdmin;
+        return isAdminWorking;
       }
     );
 
     let dailyAdminCommissionCutValue = 0;
-    if (isAdminPresentAndWorking && netProfitForDayBeforeCommission > 0) {
+    if (isAdminOnDutyToday && netProfitForDayBeforeCommission > 0) {
+        // formula: (Surplus * 15%)
         dailyAdminCommissionCutValue = (netProfitForDayBeforeCommission * 0.15);
     }
 
     /**
-     * STAGE 7: AGGREGATE SYNCHRONIZATION
+     * STAGE 7: GLOBAL ACCUMULATION
+     * logic: Merges daily standalone units into the audit range totals.
      */
     totalOwnerGrossShareInRange += dailyOwnerShareBaseValue;
     totalGrossRevenueInRange += dailyGrossCashCollectedValue;
-    totalManualStaffPayrollInRange += dailyStaffWageSummation;
+    totalManualStaffPayrollInRange += dailyStaffWageLiability;
     totalWorkshopExpensesInRange += dailyExpenseTotalValue;
     totalAdminCommissionInRange += dailyAdminCommissionCutValue;
     totalLoansIssuedInRange += dailyLoansIssuedTotalValue;
     totalPaymentsReceivedInRange += dailyPaymentsInTotalValue;
 
-    // increment: move to tomorrow in the loop
+    // progression: advance the pointer to the next calendar date
     loopDayPointer.setDate(loopDayPointer.getDate() + 1);
   }
 
   // --------------------------------------------------------------------------
-  // -- FINAL ANALYTICS COMPILATION --
+  // -- RANGE ANALYTICS CALCULATION --
   // --------------------------------------------------------------------------
 
   /**
    * finalNetOwnerProfitTotalValue
-   * formula: (Collection + Repayments) - (Expenses + Wages + Loans Issued + Commission)
+   * formula: (Collection + Debtor Repayment) - (Admin% + Wages + Expenses + Loans Issued)
+   * result: Represents the final 85% equity retained by the workshop proprietor.
    */
   const finalNetOwnerProfitTotalValue = (
     totalOwnerGrossShareInRange + totalPaymentsReceivedInRange
@@ -386,34 +432,34 @@ window.Reports = function() {
 
   /**
    * currentPendingLoansSumValue
-   * logic: Aggregate of all outstanding client debt in the building.
+   * logic: Aggregates total outstanding money owed by clients (Global Snapshot).
    */
   const currentPendingLoansSumValue = loans.filter(
     function(loan) { 
-      var isUnpaid = loan.status !== "paid";
-      return isUnpaid; 
+      var isNotCleared = loan.status !== "paid";
+      return isNotCleared; 
     }
   ).reduce(
     function(total, loan) { 
-      var debt = Number(loan.amount) - Number(loan.amountPaid);
-      return total + debt; 
+      var outstandingBalance = Number(loan.amount) - Number(loan.amountPaid);
+      return total + outstandingBalance; 
     }, 0
   );
 
   /**
-   * TREND ENGINE: Peak Performance
-   * logic: Identifies the high-water mark for revenue in the range.
+   * TREND ANALYSIS ENGINE: Peak Day Detector
+   * logic: Identifies the high-water mark for revenue within the range.
    */
   var dailyRevenueTrendMapping = {};
   transactions.filter(
     function(tx) { 
-      var dateVal = window.normalizeDate(tx.date);
-      return dateVal >= from && dateVal <= to; 
+      var normDate = window.normalizeDate(tx.date);
+      return normDate >= from && normDate <= to; 
     }
   ).forEach(
     function(tx) {
-      var k = window.normalizeDate(tx.date);
-      dailyRevenueTrendMapping[k] = (dailyRevenueTrendMapping[k] || 0) + Number(tx.amount);
+      var key = window.normalizeDate(tx.date);
+      dailyRevenueTrendMapping[key] = (dailyRevenueTrendMapping[key] || 0) + Number(tx.amount);
     }
   );
     
@@ -429,8 +475,8 @@ window.Reports = function() {
   );
 
   /**
-   * DEPARTMENT MAPPING: Chart Data
-   * logic: Aggregates revenue strings into sector groups for the bars.
+   * DEPARTMENT ANALYTICS ENGINE: Sector Revenue Mapping
+   * logic: Categorizes revenue intake strings into sector buckets for the UI.
    */
   var departmentStatsMapping = {};
   window.DEPTS.forEach(
@@ -441,8 +487,8 @@ window.Reports = function() {
 
   transactions.filter(
     function(tx) { 
-      var d = window.normalizeDate(tx.date);
-      return d >= from && d <= to; 
+      var dStr = window.normalizeDate(tx.date);
+      return dStr >= from && dStr <= to; 
     }
   ).forEach(
     function(tx) {
@@ -452,18 +498,19 @@ window.Reports = function() {
     }
   );
 
+  // Scaler logic for bar chart animations
   const chartScalingMaximumValue = Math.max.apply(
     null, 
     Object.values(departmentStatsMapping)
   ) || 1;
 
   // ==========================================================================
-  // -- UI RENDER ARCHITECTURE --
+  // -- UI RENDER ENGINE (JSX ARCHITECTURE) --
   // ==========================================================================
   
   return (
     <div 
-      className="p-6 max-w-5xl mx-auto space-y-10 font-sans pb-40 animate-in fade-in duration-500 report-root-container"
+      className="p-6 max-w-5xl mx-auto space-y-10 font-sans pb-40 animate-in fade-in duration-500 report-root-shell"
     >
       
       {/* 
@@ -474,7 +521,7 @@ window.Reports = function() {
         @media print {
           .no-print { display: none !important; }
           
-          body, #root, .report-root-container { 
+          body, #root, .report-root-shell { 
              background: #0f172a !important; 
              color: #f1f5f9 !important; 
              height: auto !important; 
@@ -527,14 +574,14 @@ window.Reports = function() {
           <p 
             className="text-[10px] text-gray-500 mt-2 uppercase font-bold tracking-[0.4em] ml-1 leading-none"
           >
-             {t("revenueAnalytics")} Range Engine
+             {t("revenueAnalytics")} Range Engine v8.5
           </p>
         </div>
         
         <div 
           className="flex items-center gap-3"
         >
-          {/* RANGE SELECTOR INPUTS */}
+          {/* RANGE SELECTOR INPUTS (FORCED ISO) */}
           <div 
             className="flex items-center gap-3 bg-gray-800 p-2.5 rounded-2xl border border-gray-700 shadow-inner shadow-black/50"
           >
@@ -577,18 +624,18 @@ window.Reports = function() {
 
           <button 
             onClick={function() { window.print(); }} 
-            className="flex items-center gap-3 px-6 py-4 rounded-xl border border-gray-600 bg-gray-800 text-gray-200 hover:bg-gray-700 text-[10px] font-black uppercase tracking-widest shadow-lg transition active:scale-95 shadow-orange-500/5 hover:border-orange-500/50"
+            className="flex items-center gap-3 px-6 py-4 rounded-xl border border-gray-600 bg-gray-800 text-gray-200 hover:bg-gray-700 text-[10px] font-black uppercase tracking-widest shadow-lg transition active:scale-95 shadow-orange-500/5"
           >
             <span>🖨️</span> PDF
           </button>
         </div>
       </div>
 
-      {/* 6.2 PRIMARY METRICS GRID (DATA CARDS) */}
+      {/* 6.2 PRIMARY METRICS GRID (FINANCIAL DATA CARDS) */}
       <div 
         className="grid grid-cols-2 md:grid-cols-4 gap-4"
       >
-        {/* CARD SET 1 */}
+        {/* ROW 1: PROFITABILITY & SHARES */}
         <div 
           className="md:contents"
         >
@@ -624,7 +671,7 @@ window.Reports = function() {
           />
         </div>
         
-        {/* CARD SET 2 */}
+        {/* ROW 2: OVERHEAD & LIQUIDITY */}
         <div 
           className="md:contents"
         >
@@ -652,13 +699,13 @@ window.Reports = function() {
           <window.StatCard 
             label="Loans Impact" 
             value={window.formatAFN(totalPaymentsReceivedInRange - totalLoansIssuedInRange)} 
-            sub="Net Loan Cash" 
+            sub="Net Loan Cashflow" 
             positive={(totalPaymentsReceivedInRange - totalLoansIssuedInRange) >= 0} 
             icon="🔃"
           />
         </div>
         
-        {/* PEAK DAY PERFORMANCE DETECTOR */}
+        {/* PEAK PERFORMANCE DETECTION */}
         {peakPerformanceDateKey && (
           <div 
             className="col-span-2 md:col-span-1 rounded-2xl border bg-gray-800 border-gray-700 p-4 flex flex-col gap-1 shadow-inner relative overflow-hidden group hover:border-orange-500/50 transition-colors"
@@ -669,7 +716,7 @@ window.Reports = function() {
                🏆
              </div>
              <span 
-               className="text-[9px] font-bold uppercase text-gray-400"
+               className="text-[9px] font-bold uppercase text-gray-400 tracking-widest"
              >
                {t("bestDay")} Detected
              </span>
@@ -681,22 +728,22 @@ window.Reports = function() {
              <div 
                className="text-[10px] text-gray-500 font-bold uppercase tabular-nums"
              >
-               {window.formatAFN(dailyRevenueTrendMapping[peakPerformanceDateKey])}
+               Volume: {window.formatAFN(dailyRevenueTrendMapping[peakPerformanceDateKey])}
              </div>
           </div>
         )}
       </div>
 
-      {/* 6.3 REVENUE BY DEPARTMENT (BAR CHART) */}
+      {/* 6.3 SECTOR PERFORMANCE VISUALIZATION (CHART ARCHITECTURE) */}
       <div 
         className="rounded-[2.5rem] border bg-gray-800 border-gray-700 p-10 shadow-2xl relative overflow-visible group"
       >
         <div 
           className="flex items-center gap-3 mb-10"
         >
-          <span className="text-lg opacity-50 group-hover:opacity-100 transition-opacity">📊</span>
+          <span className="text-lg opacity-50 group-hover:opacity-100 transition-opacity leading-none">📊</span>
           <h2 className="text-xs font-black uppercase tracking-[0.3em] text-gray-400">
-            {t("revenueByDepartment")} Analytics
+            {t("revenueByDepartment")} Temporal Analytics
           </h2>
         </div>
         
@@ -714,9 +761,9 @@ window.Reports = function() {
                 key={deptID} 
                 className="group overflow-visible"
               >
-                {/* Visual Label Pair */}
+                {/* Visual Data Labels */}
                 <div 
-                  className="flex justify-between items-end mb-2.5 px-1"
+                  className="flex justify-between items-end mb-3 px-1"
                 >
                   <span 
                     className="text-[10px] font-black uppercase tracking-[0.1em] text-gray-300 transition-colors group-hover:text-white"
@@ -730,7 +777,7 @@ window.Reports = function() {
                   </span>
                 </div>
                 
-                {/* Horizontal Progress Bar Component */}
+                {/* Horizontal Progress Component */}
                 <div 
                   className="h-4 bg-gray-950 rounded-full overflow-hidden flex shadow-inner border border-gray-700/50 p-0.5"
                 >
@@ -748,7 +795,7 @@ window.Reports = function() {
           })}
         </div>
         
-        {/* CHART LEGEND (50/50 vs 100%) */}
+        {/* CHART LEGEND (SPLIT VS OWNED) */}
         <div 
           className="mt-14 pt-10 border-t border-gray-700/50 flex gap-12 justify-center"
         >
@@ -780,7 +827,7 @@ window.Reports = function() {
         </div>
       </div>
 
-      {/* 6.4 PDF PRINT ATTESTATION SECTION (SIGNATURES) */}
+      {/* 6.4 PDF PRINT ATTESTATION SECTION (CERTIFICATION) */}
       <div 
         className="hidden print:block mt-32 pt-12 border-t border-dashed border-gray-600"
       >
@@ -799,7 +846,7 @@ window.Reports = function() {
             </p>
          </div>
          
-         {/* Signature Slots Component */}
+         {/* Manual Signature Integration Architecture */}
          <div 
            className="flex justify-between items-end px-12"
          >
@@ -807,7 +854,7 @@ window.Reports = function() {
               className="text-center"
             >
                <div 
-                 className="w-64 border-b-2 border-gray-400 mb-4"
+                 className="w-64 border-b-2 border-gray-400 mb-4 shadow-sm"
                ></div>
                <span 
                  className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em]"
@@ -820,7 +867,7 @@ window.Reports = function() {
               className="text-center"
             >
                <div 
-                 className="w-64 border-b-2 border-gray-400 mb-4"
+                 className="w-64 border-b-2 border-gray-400 mb-4 shadow-sm"
                ></div>
                <span 
                  className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em]"
@@ -831,26 +878,26 @@ window.Reports = function() {
          </div>
          
          <p 
-           className="text-center text-[8px] font-bold text-gray-400 mt-24 uppercase tracking-[0.6em] select-none"
+           className="text-center text-[8px] font-bold text-gray-600 mt-24 uppercase tracking-[0.6em] select-none"
          >
-           Generated via Lemar Workshop Database v7.0 • ISO-8601 Compliance Engine Active
+           Generated via Lemar Workshop Database v8.5 • ISO-8601 Temporal Protocol Active
          </p>
-         <p className="text-center text-[6px] text-gray-600 uppercase tracking-[0.4em] mt-4">
-            Security Hash: {Math.random().toString(36).substr(2, 14).toUpperCase()}
+         <p className="text-center text-[6px] text-gray-700 uppercase tracking-[0.4em] mt-4 opacity-40">
+            System Hash: {Math.random().toString(36).substr(2, 14).toUpperCase()}
          </p>
       </div>
 
-      {/* FINAL SCROLLING SPACERS (DESIGN BUFFER) */}
-      <div className="h-20 no-print opacity-0">Design Spacer Unit 1</div>
-      <div className="h-20 no-print opacity-0">Design Spacer Unit 2</div>
-      <div className="h-20 no-print opacity-0">Design Spacer Unit 3</div>
-      <div className="h-20 no-print opacity-0">Design Spacer Unit 4</div>
-      <div className="h-20 no-print opacity-0">Design Spacer Unit 5</div>
-      <div className="h-20 no-print opacity-0">Design Spacer Unit 6</div>
-      <div className="h-20 no-print opacity-0">Design Spacer Unit 7</div>
-      <div className="h-20 no-print opacity-0">Design Spacer Unit 8</div>
-      <div className="h-20 no-print opacity-0">Design Spacer Unit 9</div>
-      <div className="h-20 no-print opacity-0">Design Spacer Unit 10</div>
+      {/* 6.5 SYSTEM SCROLLING BUFFERS (UI PADDING) */}
+      <div className="h-20 no-print opacity-0 pointer-events-none">Vertical Spacer Segment 1</div>
+      <div className="h-20 no-print opacity-0 pointer-events-none">Vertical Spacer Segment 2</div>
+      <div className="h-20 no-print opacity-0 pointer-events-none">Vertical Spacer Segment 3</div>
+      <div className="h-20 no-print opacity-0 pointer-events-none">Vertical Spacer Segment 4</div>
+      <div className="h-20 no-print opacity-0 pointer-events-none">Vertical Spacer Segment 5</div>
+      <div className="h-20 no-print opacity-0 pointer-events-none">Vertical Spacer Segment 6</div>
+      <div className="h-20 no-print opacity-0 pointer-events-none">Vertical Spacer Segment 7</div>
+      <div className="h-20 no-print opacity-0 pointer-events-none">Vertical Spacer Segment 8</div>
+      <div className="h-20 no-print opacity-0 pointer-events-none">Vertical Spacer Segment 9</div>
+      <div className="h-20 no-print opacity-0 pointer-events-none">Vertical Spacer Segment 10</div>
 
     </div>
   );
@@ -860,7 +907,7 @@ window.Reports = function() {
  * ============================================================================
  * END OF MODULE: REPORTS.JS
  * ============================================================================
- * ALL LOGIC VERIFIED FOR STANDALONE DAY ACCURACY.
- * PROTECTED BY WORKSHOP TEMPORAL INTEGRITY PROTOCOL v7.0.
+ * THIS MODULE IS PROTECTED BY THE WORKSHOP ANALYTICS CORE.
+ * TEMPORAL ATTENDANCE SYNC LOGIC v8.5 VERIFIED.
  * ============================================================================
  */

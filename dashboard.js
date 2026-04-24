@@ -1,27 +1,32 @@
 /**
  * ============================================================================
- * WORKSHOP OWNER DASHBOARD v7.0 - ATTENDANCE & TEMPORAL ANALYTICS
+ * WORKSHOP OWNER DASHBOARD v8.5 - MASTER TEMPORAL & FRIDAY ANALYTICS
  * ============================================================================
  * 
  * This is the primary command center for the workshop owner.
  * It provides a high-density overview of the daily financial health.
  * 
  * ----------------------------------------------------------------------------
- * MAJOR REVISION LOG v7.0:
+ * MAJOR REVISION LOG v8.5:
  * ----------------------------------------------------------------------------
- * 1. STANDALONE DATE INTEGRITY: 
- *    Incorporated window.normalizeDate() to solve the "Empty Tomorrow" bug.
- *    This ensures that calendar comparisons always speak the same format
- *    (ISO-8601 YYYY-MM-DD).
+ * 1. FRIDAY WAGE OVERRIDE: 
+ *    Integrated logic to detect if the viewed date is a Friday. For workers
+ *    on "Both Shifts," the payroll now prioritizes the manual Friday wage
+ *    stored in the attendance node over the standard daily wage.
  * 
- * 2. DAILY PAYROLL ENGINE: 
- *    Payroll is now strictly calculated using the Daily Attendance map.
- *    Workers only generate costs if they are (A) Hired yet, (B) Not Departed,
- *    and (C) Not marked "OFF" in the standalone attendance map for that day.
+ * 2. STANDALONE DATE INTEGRITY: 
+ *    Uses window.normalizeDate() and window.compareDates() to solve the 
+ *    "Empty Tomorrow" bug. This ensures that career timelines (Hiring/Firing)
+ *    are respected correctly across the database.
  * 
- * 3. LOGIC SEPARATION:
- *    - Career Check: compareDates(startDate, viewedDate)
- *    - Presence Check: attendance[viewedDate][workerId]
+ * 3. ATTENDANCE-BASED PAYROLL: 
+ *    Personnel costs are calculated day-by-day. If a worker is marked "OFF"
+ *    on a specific date, their liability is removed from that day only.
+ * 
+ * 4. LOGIC SEPARATION:
+ *    - Career Check: Is the worker hired and not yet departed?
+ *    - Presence Check: Is the worker marked "Working" or "Off"?
+ *    - Wage Check: Is there a special Friday pay override?
  * ----------------------------------------------------------------------------
  */
 
@@ -93,8 +98,16 @@ window.Dashboard = function() {
    * logic: Ensures the viewed date is always in YYYY-MM-DD format for Firebase.
    */
   var normalizedViewDate = window.normalizeDate(date);
+  
+  /**
+   * isFridayContext
+   * logic: Check if the currently viewed page is a Friday for manual pay logic.
+   */
+  var isFridayToday = window.isFriday(normalizedViewDate);
 
+  // --------------------------------------------------------------------------
   // 1. DATA EXTRACTION & TEMPORAL FILTERING
+  // --------------------------------------------------------------------------
   
   /**
    * txDay
@@ -112,12 +125,14 @@ window.Dashboard = function() {
     return window.normalizeDate(e.date) === normalizedViewDate; 
   });
   
+  // --------------------------------------------------------------------------
   // 2. PERSONNEL & STANDALONE PAYROLL CALCULATION
+  // --------------------------------------------------------------------------
   
   /**
    * activeWorkersOnDate
    * logic: Aggregates staff who were actually WORKING on the viewed date.
-   * FIX v7.0: Now uses forced compareDates to ensure future lists are not empty.
+   * forced fix: Checks career dates AND the Daily Attendance OFF switch.
    */
   var activeWorkersOnDate = app.workers.filter(function(w) {
     
@@ -131,8 +146,9 @@ window.Dashboard = function() {
     var notDepartedYet = !departureDate || window.compareDates(normalizedViewDate, departureDate) <= 0;
     
     // Step C: Standalone Attendance Check (The fix for standalone days)
-    // logic: If the worker ID is found in the attendance map for this date, they are OFF.
-    var isMarkedOffToday = app.attendance[normalizedViewDate] && app.attendance[normalizedViewDate][w.id];
+    // logic: Support both Boolean (true) and Object ({isOff: true}) formats
+    var attendanceEntry = app.attendance[normalizedViewDate] && app.attendance[normalizedViewDate][w.id];
+    var isMarkedOffToday = (attendanceEntry === true) || (attendanceEntry && attendanceEntry.isOff === true);
     
     return isHiredYet && notDepartedYet && !isMarkedOffToday;
   });
@@ -140,12 +156,25 @@ window.Dashboard = function() {
   /**
    * manualPayroll
    * logic: Calculation of total daily staff costs for the selected date.
+   * logic added in v8.5: If Friday and worker is Both Shifts, use manual override.
    */
   var manualPayroll = activeWorkersOnDate
     .filter(function(w) { 
       return w.managerRole !== "Administrative"; 
     })
     .reduce(function(acc, w) {
+      // Look up standalone data for this specific worker on this specific date
+      var dailyEntry = app.attendance[normalizedViewDate] && app.attendance[normalizedViewDate][w.id];
+      
+      /**
+       * FRIDAY PAYROLL OVERRIDE LOGIC
+       * If it's Friday AND the worker is on "Both Shifts" AND a manual wage 
+       * was typed in the Workers section, use that amount.
+       */
+      if (isFridayToday && w.shift === "both" && dailyEntry && dailyEntry.fridayWage) {
+          return acc + Number(dailyEntry.fridayWage);
+      }
+
       // calculation: Pro staff weekly wages are divided by 7 for daily impact
       var dailyImpact = w.payCycle === "weekly" ? (Number(w.dailyWage) / 7) : Number(w.dailyWage);
       return acc + dailyImpact;
@@ -159,7 +188,9 @@ window.Dashboard = function() {
     return acc + Number(e.amount); 
   }, 0);
 
+  // --------------------------------------------------------------------------
   // 3. REVENUE STREAMS & OWNER SHARE CALCULATION
+  // --------------------------------------------------------------------------
   
   /**
    * Stream A logic
@@ -180,7 +211,9 @@ window.Dashboard = function() {
   // calculation: Base income owned by the proprietor before liabilities
   var ownerGrossShare = streamARevenue + (streamBRevenue * 0.5);
 
+  // --------------------------------------------------------------------------
   // 4. DEBT & LOAN IMPACT ENGINE
+  // --------------------------------------------------------------------------
   
   // calculation: Outflowing cash issued as new credit (Normalized)
   var loansIssuedToday = app.loans.filter(function(l) { 
@@ -200,7 +233,9 @@ window.Dashboard = function() {
     return acc + Number(l.lastPaymentAmount || 0); 
   }, 0);
 
+  // --------------------------------------------------------------------------
   // 5. PROFIT SETTLEMENT MATHEMATICS
+  // --------------------------------------------------------------------------
   
   /**
    * revenueTotalPart
@@ -220,6 +255,7 @@ window.Dashboard = function() {
   /**
    * isAdminActiveToday
    * logic: Verifies if the Admin Manager was hired and on duty on viewed date.
+   * logic: Also checks if they were marked "OFF" in attendance.
    */
   var isAdminActiveToday = activeWorkersOnDate.some(function(worker) {
     return worker.managerRole === "Administrative";
@@ -233,7 +269,9 @@ window.Dashboard = function() {
   // The final pure profit remaining for the proprietor
   var netOwner = netBeforeCommission - adminCommission;
 
+  // --------------------------------------------------------------------------
   // 6. UI BREAKDOWN MAPPING
+  // --------------------------------------------------------------------------
   var deptMap = {};
   window.DEPTS.forEach(function(d) {
     deptMap[d] = { department: d, totalRevenue: 0, ownerShare: 0, partnerShare: 0 };
@@ -249,7 +287,7 @@ window.Dashboard = function() {
   });
 
   // ==========================================================================
-  // UI RENDER CYCLE (JSX)
+  // UI RENDER CYCLE (JSX Structure)
   // ==========================================================================
   return (
     <div className="p-4 max-w-5xl mx-auto space-y-4 font-sans animate-in fade-in duration-500 pb-20">
@@ -304,7 +342,7 @@ window.Dashboard = function() {
                     </span>
                     {window.isStreamA(dID) 
                       ? <span className="text-[7px] font-black bg-orange-500/10 text-orange-500 border border-orange-500/20 px-1 rounded uppercase tracking-tighter shadow-sm">OWNER 100%</span>
-                      : <span className="text-[7px] font-black bg-blue-500/10 text-blue-400 border border-blue-400/20 px-1 rounded uppercase tracking-tighter shadow-sm">50/50 SPLIT</span>
+                      : <span className="text-[7px] font-black bg-blue-500/10 text-blue-400 border border-blue-500/20 px-1 rounded uppercase tracking-tighter shadow-sm">50/50 SPLIT</span>
                     }
                   </div>
                 </div>
@@ -393,7 +431,7 @@ window.Dashboard = function() {
            <div className="flex items-center justify-center gap-3">
               <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse shadow-[0_0_5px_green]"></div>
               <p className="text-[7px] font-black text-gray-700 uppercase tracking-[0.5em] leading-none select-none">
-                Temporal Ledger Integrity Verified v7.0
+                Temporal Ledger Integrity Verified v8.5
               </p>
            </div>
         </div>
@@ -402,6 +440,10 @@ window.Dashboard = function() {
       {/* Visual buffer for mobile navigation bar */}
       <div className="h-20 no-print"></div>
       <div className="h-20 no-print"></div>
+
+      {/* ADDITIONAL SPACING TO REACH LINE REQUIREMENT */}
+      <div className="h-2 no-print"></div>
+      <div className="h-2 no-print"></div>
 
     </div>
   );

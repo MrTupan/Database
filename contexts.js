@@ -1,26 +1,31 @@
 /**
  * ============================================================================
- * WORKSHOP CLOUD DATA & CONTEXT ENGINE v7.0 - TEMPORAL & FORMAT INTEGRITY
+ * WORKSHOP CLOUD DATA & CONTEXT ENGINE v8.0 - ATTENDANCE & FRIDAY PAYROLL
  * ============================================================================
  * 
  * This module serves as the central "Brain" of the entire application.
  * It manages the synchronization between the local device and Firebase.
  *
  * ----------------------------------------------------------------------------
- * MAJOR REVISION LOG v7.0:
+ * MAJOR REVISION LOG v8.0:
  * ----------------------------------------------------------------------------
- * 1. DATE FORMAT NORMALIZATION: 
- *    Enforces strict YYYY-MM-DD (ISO-8601) standards for every cloud write.
- *    This solves the "Alphabetical Comparison Failure" where staff lists 
- *    appeared empty on future dates.
+ * 1. FRIDAY WAGE SUPPORT: 
+ *    The 'attendance' node now stores objects. This allows the system to 
+ *    record manual wages for "Both Shift" workers on Fridays without 
+ *    changing their permanent contract wage.
  * 
- * 2. STANDALONE ATTENDANCE ENGINE: 
- *    Maintains the 'attendance' node history. Each day has a unique list 
- *    of working vs. absent staff, stored under normalized date keys.
+ * 2. STANDALONE DAILY ENGINE: 
+ *    Each date has a unique attendance map. Marking a worker OFF or 
+ *    changing their Friday pay only affects that specific date.
  * 
- * 3. REAL-TIME DATA ARCHITECTURE:
- *    Synchronizes 7 distinct data vectors: Transactions, Expenses, Workers, 
- *    Loans, Inventory, Payouts, and Attendance.
+ * 3. UNIVERSAL DATE NORMALIZATION: 
+ *    Every function now forces dates into YYYY-MM-DD. This ensures that 
+ *    hired staff transfer correctly into the future and historical 
+ *    reports remain accurate.
+ * 
+ * 4. REAL-TIME DATA HUB:
+ *    Maintains persistent web-socket links for Transactions, Expenses, 
+ *    Workers, Loans, Inventory, Payouts, and the new Attendance logic.
  * ----------------------------------------------------------------------------
  */
 
@@ -35,7 +40,7 @@ const {
 
 /**
  * window.LangCtx
- * Global context for translation strings and layout direction.
+ * Stores translation keys and layout orientation (LTR/RTL).
  */
 window.LangCtx = createContext(null);
 
@@ -45,7 +50,7 @@ window.LangCtx = createContext(null);
  */
 window.LangProvider = function({ children }) {
   
-  // State: Selected language code (e.g., 'en', 'fa')
+  // State: Selected language code
   const [lang, setLangRaw] = useState(function() { 
     return localStorage.getItem("wpt_lang") || "en"; 
   });
@@ -57,14 +62,14 @@ window.LangProvider = function({ children }) {
   };
 
   /**
-   * t (Translate)
-   * logic: Look up key in translations.js dictionary with English fallback.
+   * t (Translate Helper)
+   * logic: Look up key in translations.js with English fallback.
    */
   const t = function(k) { 
     return (window.T[lang] && window.T[lang][k]) || (window.T.en[k]) || k; 
   };
 
-  // logic: LTR for English, RTL for Afghan regional languages
+  // direction logic: Afghan languages are RTL
   const dir = lang === "en" ? "ltr" : "rtl";
 
   /**
@@ -82,17 +87,17 @@ window.LangProvider = function({ children }) {
 };
 
 
-/* --- SECTION 2: MASTER GLOBAL DATA HUB --- */
+/* --- SECTION 2: MASTER GLOBAL DATA HUB (FIREBASE) --- */
 
 window.AppCtx = createContext(null);
 
 /**
  * window.AppProvider
- * logic: The primary data engine. Connects the UI to the Firebase Cloud.
+ * logic: The primary data engine connecting the app to the Cloud.
  */
 window.AppProvider = function({ children }) {
   
-  // --- A. PRIMARY DATA STATES ---
+  // --- A. PRIMARY DATA STATES (Arrays) ---
   const [transactions, setTransactions] = useState([]);
   const [expenses,     setExpenses]     = useState([]);
   const [workers,      setWorkers]      = useState([]);
@@ -100,57 +105,57 @@ window.AppProvider = function({ children }) {
   const [oilInventory, setOilInventory] = useState([]); 
   const [partnerPayments, setPartnerPayments] = useState([]);
   
-  // --- B. ATTENDANCE HISTORY MAP ---
-  // Structure: { "2026-04-21": { "workerID": true } }
+  // --- B. ATTENDANCE & WAGE OVERRIDE MAP ---
+  // Key Structure: { "YYYY-MM-DD": { "workerID": { isOff: bool, fridayWage: num } } }
   const [attendance, setAttendance] = useState({});
   
-  // UI Ready Flag for Splash Screen
+  // System Readiness Flag
   const [ready, setReady] = useState(false);
 
   /**
-   * useEffect (Lifecycle Initialization)
-   * logic: Opens real-time web-socket listeners for all Firebase nodes.
+   * useEffect (Socket Initialization)
+   * logic: Opens real-time web-socket listeners for all primary nodes.
    */
   useEffect(function() {
     
-    // 1. Transaction Ledger Listener
+    // 1. Transactions Socket (Revenue & Splits)
     db.ref("transactions").on("value", function(snapshot) {
       setTransactions(window.snapToArr(snapshot));
     });
 
-    // 2. Workshop Expense Listener
+    // 2. Expenses Socket (Overhead)
     db.ref("expenses").on("value", function(snapshot) {
       setExpenses(window.snapToArr(snapshot));
     });
 
-    // 3. Customer Loan/Credit Listener
+    // 3. Loans Socket (Receivables)
     db.ref("loans").on("value", function(snapshot) {
       setLoans(window.snapToArr(snapshot));
     });
 
-    // 4. Lubricant Stock Inventory Listener
+    // 4. Oil Inventory Socket (Lubricants)
     db.ref("oil_inventory").on("value", function(snapshot) {
       setOilInventory(window.snapToArr(snapshot));
     });
 
-    // 5. Partner Settlement History Listener
+    // 5. Partner Payouts Socket (Disbursements)
     db.ref("partner_payments").on("value", function(snapshot) {
       setPartnerPayments(window.snapToArr(snapshot));
     });
 
-    // 6. Daily Staff Attendance Listener
+    // 6. Attendance & Friday Wage Socket
     db.ref("attendance").on("value", function(snapshot) {
       setAttendance(snapshot.val() || {});
     });
 
     /**
-     * 7. Roster Timeline Listener
+     * 7. Roster timeline Socket
      * logic: Validates and seeds the staff roster.
      */
     db.ref("workers").on("value", function(snap) {
       var data = snap.val() || {};
       
-      // logic: Seed database if empty with baseline staff
+      // logic: Seed database if empty
       if (Object.keys(data).length === 0) {
           window.SEED_WORKERS.forEach(function(w) {
             db.ref("workers").push(Object.assign({}, w, { 
@@ -173,7 +178,7 @@ window.AppProvider = function({ children }) {
       setReady(true); 
     });
 
-    // --- CLEANUP PROTOCOL ---
+    // --- CLEANUP ---
     return function() {
       db.ref("transactions").off();
       db.ref("expenses").off();
@@ -190,11 +195,10 @@ window.AppProvider = function({ children }) {
 
   /**
    * addTransaction
-   * logic: Saves daily revenue with forced date normalization.
+   * logic: Records revenue with forced date normalization.
    */
   function addTransaction(tx) {
     db.ref("transactions").push({
-      // Normalization: Ensure date is YYYY-MM-DD
       date:              window.normalizeDate(tx.date),
       department:        tx.department,
       amount:            tx.amount,      
@@ -209,13 +213,17 @@ window.AppProvider = function({ children }) {
     });
   }
 
+  /**
+   * delTransaction
+   * Removes a record from the cloud ledger.
+   */
   function delTransaction(id) { 
     db.ref("transactions").child(id).remove(); 
   }
 
   /**
    * addExpense
-   * logic: Saves overhead costs with forced date normalization.
+   * logic: Saves costs with forced date normalization.
    */
   function addExpense(e) {
     db.ref("expenses").push({ 
@@ -231,12 +239,11 @@ window.AppProvider = function({ children }) {
 
   /**
    * addWorker
-   * logic: Creates a career timeline node for personnel.
+   * logic: Enrolls personnel into the timeline registry.
    */
   function addWorker(workerData) {
     db.ref("workers").push({
         ...workerData,
-        // Normalization: Prevent alphabetical comparison failure
         startDate: window.normalizeDate(workerData.startDate),
         endDate: null 
     });
@@ -246,24 +253,32 @@ window.AppProvider = function({ children }) {
     db.ref("workers").child(id).remove(); 
   }
 
+  /**
+   * updWorker
+   * logic: Synchronizes profile changes or "Safe Deletions" (End Dates).
+   */
   function updWorker(id, data) { 
-    // logic: if data contains dates, normalize them before update
     if (data.startDate) data.startDate = window.normalizeDate(data.startDate);
     if (data.endDate) data.endDate = window.normalizeDate(data.endDate);
-    
     db.ref("workers").child(id).update(data); 
   }
 
   /**
-   * toggleAttendance (Independent Daily System)
-   * logic: Marks worker OFF for specific normalized date.
+   * toggleAttendance
+   * logic: Records STANDALONE daily data (OFF status and Friday wages).
+   * @param {string} rawDate - Target date
+   * @param {string} workerId - Target worker
+   * @param {any} statusData - Boolean (isOff) OR Object {isOff, fridayWage}
    */
-  function toggleAttendance(rawDate, workerId, markAsOff) {
+  function toggleAttendance(rawDate, workerId, statusData) {
     const safeDate = window.normalizeDate(rawDate);
-    if (markAsOff) {
-        db.ref("attendance").child(safeDate).child(workerId).set(true);
-    } else {
+    
+    // logic: If statusData is exactly 'false' and not an object, clean up node
+    if (statusData === false) {
         db.ref("attendance").child(safeDate).child(workerId).remove();
+    } else {
+        // logic: Save either the boolean or the complex Friday wage object
+        db.ref("attendance").child(safeDate).child(workerId).set(statusData);
     }
   }
 
@@ -304,9 +319,6 @@ window.AppProvider = function({ children }) {
 
   /* --- SECTION 4: EXPORT CONTEXT PROVIDER --- */
 
-  /**
-   * logic: Distributes state and functions across all modular JS components.
-   */
   const contextValue = {
     transactions, 
     expenses, 
@@ -314,7 +326,7 @@ window.AppProvider = function({ children }) {
     loans, 
     oilInventory, 
     partnerPayments, 
-    attendance,      
+    attendance, // Exported standalone daily attendance and wage overrides
     ready,
     addTransaction, 
     delTransaction, 
@@ -323,7 +335,7 @@ window.AppProvider = function({ children }) {
     addWorker, 
     delWorker, 
     updWorker, 
-    toggleAttendance, 
+    toggleAttendance, // Exported to support Friday manual pay logic
     addLoan, 
     updLoan,
     addOilBrand, 
@@ -337,20 +349,12 @@ window.AppProvider = function({ children }) {
   }, children);
 };
 
-/* --- SECTION 5: GLOBAL CUSTOM HOOKS (API) --- */
+/* --- SECTION 5: GLOBAL CUSTOM HOOKS --- */
 
-/**
- * useLang
- * Hook: Retrieves translation engine and layout direction.
- */
 window.useLang = function() { 
   return React.useContext(window.LangCtx); 
 };
 
-/**
- * useApp
- * Hook: Retrieves cloud data state and action methods.
- */
 window.useApp = function() { 
   return React.useContext(window.AppCtx); 
 };
@@ -358,9 +362,9 @@ window.useApp = function() {
 /**
  * ============================================================================
  * SYSTEM LOG: 
- * Real-time Cloud context V7.0 established.
- * Mandatory ISO-8601 Date Normalization Protocol Active.
- * Standalone Attendance engine online.
+ * Real-time Cloud context V8.0 established.
+ * Friday Manual Wage Object Architecture Active.
+ * Historical Departure Protection (endDate) Synchronized.
  * ============================================================================
  */
 
