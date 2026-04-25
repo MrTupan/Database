@@ -5,7 +5,7 @@
  */
 
 // CHANGE THIS VERSION (v1, v2, v3) every time you upload a big update!
-const CACHE_NAME = 'workshop-vault-v0.15'; 
+const CACHE_NAME = 'workshop-vault-v0.16'; 
 
 const ASSETS_TO_CACHE = [
   './',
